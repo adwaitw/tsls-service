@@ -1,0 +1,11 @@
+# Dependencies
+/node_modules
+
+# Compiled output
+/dist
+
+# Build cache
+tsconfig.tsbuildinfo
+
+# Secrets
+.env
