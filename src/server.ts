@@ -1,90 +1,100 @@
-import express from 'express';
+import express, { Request, Response } from 'express';
+import bodyParser from 'body-parser';
+import { v4 as uuidv4 } from 'uuid';
 
-import {
-    checkTypeErrors,
-    safeWriteFile,
-    safeMkdir,
-    findAllReferences,
-    safeRenameSymbol,
-    safeUpdateImport
-} from './refactor-tool';
+// Define a type for our tools to keep TypeScript happy
+type ToolFunction = (args: any) => Promise<any>;
+interface ToolRegistry {
+  [key: string]: ToolFunction;
+}
 
+// ==================================================================
+// MOCK TOOL IMPLEMENTATIONS (v0.2.0 baseline)
+// ==================================================================
+const tools: ToolRegistry = {
+    'check_types': async (args: any) => {
+    console.log(`[TSLS] Checking types for: ${args.filePath}`);
+    return { status: 'success', errors: [], checkedFile: args.filePath };
+    },
+
+    'find_references': async (args: any) => {
+    console.log(`[TSLS] Finding refs in ${args.filePath} at pos ${args.position}`);
+    return { 
+        status: 'success', 
+        references: [
+        { file: 'src/components/Button.tsx', line: 10 },
+        { file: 'src/pages/index.tsx', line: 42 }
+        ]
+    };
+    }
+};
+
+// ==================================================================
+// MCP / JSON-RPC 2.0 SERVER
+// ==================================================================
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.use(bodyParser.json());
 
-const PORT = 3001;
+app.post('/mcp', async (req: Request, res: Response) => {
+    const { jsonrpc, method, params, id } = req.body;
+    // Ensure we have a string ID for logging, even if null in request
+    const reqId = (id !== undefined && id !== null) ? String(id) : uuidv4().substring(0, 8);
 
-app.use((req, res, next) => {
-    console.log(`[TSLS Service] Received ${req.method} request for ${req.url}`);
-    next();
-});
+    console.log(`➡️  [MCP Req ${reqId}] ${method}`);
 
-app.post('/check-types', async (req, res) => {
+    if (jsonrpc !== '2.0' || !method) {
+    return res.status(400).json({
+        jsonrpc: '2.0', error: { code: -32600, message: 'Invalid Request' }, id: id
+    });
+    }
+
     try {
-        const { filePath } = req.body;
-        if (!filePath) return res.status(400).json({ error: 'filePath is required' });
-        const result = await checkTypeErrors(filePath);
-        res.json({ result });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
+    switch (method) {
+        case 'tools/list':
+        return res.json({
+            jsonrpc: '2.0',
+            result: {
+            tools: [
+                { name: 'check_types', description: 'Run TS compiler validation' },
+                { name: 'find_references', description: 'Find all symbol references' }
+            ]
+            },
+            id: id
+        });
+
+        case 'tools/call':
+        // Safe access with optional chaining and explicit type check
+        const toolName = params?.name as string;
+        const toolArgs = params?.arguments || {};
+
+        if (!toolName || !Object.prototype.hasOwnProperty.call(tools, toolName)) {
+            throw { code: -32601, message: `Tool not found: ${toolName}` };
+        }
+        
+        const result = await tools[toolName](toolArgs);
+        return res.json({
+            jsonrpc: '2.0',
+            result: { content: [{ type: 'json', json: result }] },
+            id: id
+        });
+
+        default:
+        throw { code: -32601, message: `Method not found: ${method}` };
+    }
+    } catch (error: any) {
+    console.error(`❌ [MCP Error ${reqId}]`, error.message || error);
+    return res.status(500).json({
+        jsonrpc: '2.0',
+        error: { 
+        code: error.code || -32603, 
+        message: error.message || 'Internal Error' 
+        },
+        id: id
+    });
     }
 });
 
-app.post('/write-file', async (req, res) => {
-    try {
-        const { filePath, content } = req.body;
-        if (!filePath || content == null) return res.status(400).json({ error: 'filePath and content are required' });
-        const result = await safeWriteFile(filePath, content);
-        res.json({ result });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/mkdir', async (req, res) => {
-    try {
-        const { dirPath } = req.body;
-        if (!dirPath) return res.status(400).json({ error: 'dirPath is required' });
-        const result = await safeMkdir(dirPath);
-        res.json({ result });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/find-references', async (req, res) => {
-    try {
-        const { filePath, symbolName } = req.body;
-        if (!filePath || !symbolName) return res.status(400).json({ error: 'filePath and symbolName are required' });
-        const result = await findAllReferences(filePath, symbolName);
-        res.json({ result });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/rename-symbol', async (req, res) => {
-    try {
-        const { filePath, symbolName, newName } = req.body;
-        if (!filePath || !symbolName || !newName) return res.status(400).json({ error: 'filePath, symbolName, and newName are required' });
-        const result = await safeRenameSymbol(filePath, symbolName, newName);
-        res.json({ result });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/update-import', async (req, res) => {
-    try {
-        const { filePath, oldPath, newPath } = req.body;
-        if (!filePath || !oldPath || !newPath) return res.status(400).json({ error: 'filePath, oldPath, and newPath are required' });
-        const result = await safeUpdateImport(filePath, oldPath, newPath);
-        res.json({ result });
-    } catch (e: any) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
+const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-    console.log(`[TSLS Service] "Robotic Arm" is online and listening on http://localhost:${PORT}`);
+    console.log(`🤖 TSLS (MCP) Server v0.2.0 running on port ${PORT}`);
 });
